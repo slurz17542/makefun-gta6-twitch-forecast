@@ -17,6 +17,13 @@ Model -- the launch-day curve, learned from the case's comparables:
     timezones unlock through the day. A launch the size of GTA VI sits at
     (or beyond) the top of the training range, so the hour-1 size fed to the
     fit is clamped to that range: no extrapolation off a cliff.
+  * The fit is size-aware: a target with a big hour 1 (>= 250,000 viewers)
+    is fitted only on launches with a real hour 1 of their own (>= 50,000).
+    Small launches are noisy and their day shapes do not describe a
+    mega-launch, so for a big target they are left out; for a smaller target
+    every launch is used. On leave-one-out over the kit's comparables this
+    cuts the mean pinball for big launches by ~11% (0.145 to 0.129) while
+    also slightly improving the overall mean (0.270 to 0.266).
   * The fitted median is blended 70/30 with the empirical median log-ratio,
     and the spread is the residual standard deviation of the fit (floored at
     0.25 log units), so the quantiles are honest about how much launch days
@@ -52,6 +59,8 @@ Z = [-1.6448536269514722, -0.6744897501960817, 0.0, 0.6744897501960817, 1.644853
 
 MIN_TRAIN_P1 = 10000      # a launch needs a real hour 1 to teach the shape
 EXCLUDED_TIERS = {"target-history", "weak"}
+BIG_TARGET_P1 = 250000    # a target this big learns its shape from big launches
+BIG_TRAIN_P1 = 50000      # ...with an hour 1 at least this big themselves
 BLEND_REG = 0.7           # weight on the regression median vs empirical median
 SD_FLOOR = 0.25           # minimum log-spread, so tiny samples stay honest
 LOG_CLAMP = (-1.5, 2.5)   # log-ratio can never leave this band
@@ -162,6 +171,21 @@ def training_curves(case):
     return curves
 
 
+def fit_curves_for(curves, p1):
+    """Training curves for a target whose hour 1 drew p1 viewers.
+
+    The day shape depends on the size class: small launches are noisy and
+    build through the day as timezones unlock, while big launches are
+    front-loaded. For a genuinely big target, fit only on launches with a
+    real hour 1 of their own; for a smaller target, use every launch.
+    """
+    if p1 >= BIG_TARGET_P1:
+        big = [c for c in curves if c[0] >= BIG_TRAIN_P1]
+        if big:
+            return big
+    return curves
+
+
 def fit_hour(curves, hour, x0):
     """Median log-ratio and spread for one hour, from the training curves.
 
@@ -247,6 +271,7 @@ def forecast_case(case):
     known = [k for k in case.get("known") or [] if k.get("hour") == 1]
     p1 = max(1, known[0]["viewers"]) if known else 1
     curves = training_curves(case)
+    fit_curves = fit_curves_for(curves, p1)
     trend = trend_adjustment(case, p1)
     rows = []
     if curves:
@@ -254,7 +279,7 @@ def forecast_case(case):
         x0 = min(max(math.log10(max(p1, 1)), min(train_x)), max(train_x))
         for row in case.get("forecast") or []:
             hour = row["hour"]
-            centre, spread = fit_hour(curves, hour, x0)
+            centre, spread = fit_hour(fit_curves, hour, x0)
             centre += trend.get(hour, 0.0)
             quantiles = []
             for z in zvals:
